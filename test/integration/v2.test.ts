@@ -190,6 +190,7 @@ describe("OpenCode 2 package entrypoint", () => {
     const toolCalled = new Promise<void>((resolve) => {
       releaseStep = resolve;
     });
+    const reasoningReceived = Promise.withResolvers<undefined>();
     const registration = { dispose: vi.fn(() => Promise.resolve()) };
     const contextInput: unknown = {
       app: { version: "2.0.4" },
@@ -241,6 +242,7 @@ describe("OpenCode 2 package entrypoint", () => {
                 text: "Thinking",
               },
             };
+            reasoningReceived.resolve(undefined);
             await toolCalled;
             yield {
               type: "session.step.ended",
@@ -284,6 +286,7 @@ describe("OpenCode 2 package entrypoint", () => {
     await vi.waitFor(() => {
       expect(runtime.startActiveGenerationStep).toHaveBeenCalled();
     });
+    await reasoningReceived.promise;
     executeBefore?.({
       id: "call-1",
       messageID: "assistant-1",
@@ -306,13 +309,14 @@ describe("OpenCode 2 package entrypoint", () => {
           parentID: "user-1",
           output: [
             expect.objectContaining({
-              content: "Hello",
-              thinking: [{ type: "thinking", content: "Thinking" }],
-              tool_calls: [
+              content: [
+                { type: "text", text: "Hello" },
+                { type: "reasoning", text: "Thinking" },
                 {
+                  type: "tool-call",
                   id: "call-1",
                   name: "read",
-                  arguments: JSON.stringify({ path: "README.md" }),
+                  input: { path: "README.md" },
                 },
               ],
             }),

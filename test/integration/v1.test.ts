@@ -1956,6 +1956,7 @@ describe("built plugin", { concurrent: false }, () => {
   );
 
   test.each([
+    "complete",
     "stale-content",
     "missing-later-call",
     "missing-later-step",
@@ -2112,6 +2113,7 @@ describe("built plugin", { concurrent: false }, () => {
           return [step.marker, step.text, step.reasoning, step.tool];
         }
         if (
+          snapshot === "complete" ||
           snapshot === "snapshot-only-content" ||
           snapshot === "snapshot-ahead-of-live" ||
           snapshot === "missing-earlier-call"
@@ -2164,6 +2166,29 @@ describe("built plugin", { concurrent: false }, () => {
     });
     if (!followup) {
       throw new Error("Expected followup generation");
+    }
+    if (snapshot === "complete") {
+      const generation = spans.find(
+        (span) => span.name === "opencode.generation" && span !== followup,
+      );
+      if (!generation) {
+        throw new Error("Expected multi-step generation");
+      }
+      const input = getJsonAttribute(followup, "langfuse.observation.input");
+      if (!Array.isArray(input)) {
+        throw new Error("Expected message history");
+      }
+      expect(
+        getJsonAttribute(generation, "langfuse.observation.output"),
+      ).toEqual(
+        input.filter(
+          (message: unknown) =>
+            typeof message === "object" &&
+            message !== null &&
+            "role" in message &&
+            message.role === "assistant",
+        ),
+      );
     }
     expect(getJsonAttribute(followup, "langfuse.observation.input")).toEqual([
       { role: "user", content: [{ type: "text", text: "Read two files" }] },
