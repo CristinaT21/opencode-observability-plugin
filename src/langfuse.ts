@@ -1233,9 +1233,10 @@ export class LangfuseClient {
   }
 
   private getAssistantMessage(messageID: string) {
-    return buildAssistantMessage(
+    const messages = splitAssistantSteps(
       Array.from(this.traceState.assistantParts.get(messageID)?.values() ?? []),
-    );
+    ).flatMap((step) => buildAssistantMessage(step) ?? []);
+    return messages.length > 0 ? messages : undefined;
   }
 
   setSessionHistory(sessionID: string, history: SessionHistory) {

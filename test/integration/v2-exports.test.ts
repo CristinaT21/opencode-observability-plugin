@@ -190,11 +190,6 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
       status: "error" as const,
     },
   ];
-  const toolCalls = calls.map((call) => ({
-    id: call.id,
-    name: "read",
-    arguments: JSON.stringify({ path: call.path }),
-  }));
   const results = calls.map((call) => ({
     role: "tool",
     name: "read",
@@ -208,12 +203,17 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
     },
     {
       role: "assistant" as const,
-      content: calls.map((call) => ({
-        type: "tool-call" as const,
-        id: call.id,
-        name: "read",
-        input: { path: call.path },
-      })),
+      content: [
+        { type: "reasoning" as const, text: "Need the files" },
+        { type: "text" as const, text: "Reading first. " },
+        { type: "text" as const, text: "Reading the rest." },
+        ...calls.map((call) => ({
+          type: "tool-call" as const,
+          id: call.id,
+          name: "read",
+          input: { path: call.path },
+        })),
+      ],
     },
     ...calls.map((call) => ({
       role: "tool" as const,
@@ -281,6 +281,36 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
               created: Date.now(),
               data: { sessionID, assistantMessageID, agent, model },
             };
+            yield {
+              id: "v2-reasoning-ended",
+              durable: { aggregateID: sessionID, seq: 2, version: 1 as const },
+              type: "session.reasoning.ended",
+              created: Date.now(),
+              data: {
+                sessionID,
+                assistantMessageID,
+                ordinal: 0,
+                text: "Need the files",
+              },
+            };
+            for (const text of ["Reading first. ", "Reading the rest."]) {
+              yield {
+                id: `v2-text-ended-${text}`,
+                durable: {
+                  aggregateID: sessionID,
+                  seq: 3,
+                  version: 1 as const,
+                },
+                type: "session.text.ended",
+                created: Date.now(),
+                data: {
+                  sessionID,
+                  assistantMessageID,
+                  ordinal: text === "Reading first. " ? 1 : 2,
+                  text,
+                },
+              };
+            }
             for (const call of calls) {
               await toolHooks.run("execute.before", {
                 sessionID,
@@ -475,7 +505,7 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
     throw new Error("Expected both generations");
   }
   expect(getJsonAttribute(generation, "langfuse.observation.output")).toEqual([
-    { role: "assistant", content: "", tool_calls: toolCalls },
+    messages[1],
   ]);
   for (const [index, call] of calls.entries()) {
     const tool = tools.find((span) => {

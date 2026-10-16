@@ -1,4 +1,5 @@
 import type { Plugin } from "@opencode/plugin";
+import type { SessionHooks } from "@opencode/plugin/promise/session";
 import { Effect } from "effect";
 
 import type { ToolDefinition } from "./langfuse.js";
@@ -31,9 +32,7 @@ const LangfusePlugin = {
         agent: string;
         model: { id: string; providerID: string; variant?: string };
         started: number;
-        text: string[];
-        reasoning: string[];
-        toolCalls: Map<string, { id: string; name: string; arguments: string }>;
+        content: SessionHooks["context"]["messages"][number]["content"][number][];
       }
     >();
 
@@ -78,11 +77,20 @@ const LangfusePlugin = {
 
     registrations.push(
       await ctx.tool.hook("execute.before", (input) => {
-        generationDetails.get(input.messageID)?.toolCalls.set(input.id, {
-          id: input.id,
-          name: input.tool,
-          arguments: JSON.stringify(input.input),
-        });
+        const content = generationDetails.get(input.messageID)?.content;
+        if (
+          content &&
+          !content.some(
+            (part) => part.type === "tool-call" && part.id === input.id,
+          )
+        ) {
+          content.push({
+            type: "tool-call",
+            id: input.id,
+            name: input.tool,
+            input: input.input,
+          });
+        }
         langfuse.rememberToolCall({
           callID: input.id,
           messageID: input.messageID,
@@ -156,9 +164,7 @@ const LangfusePlugin = {
               agent: event.data.agent,
               model: event.data.model,
               started: event.created,
-              text: [],
-              reasoning: [],
-              toolCalls: new Map(),
+              content: [],
             });
             langfuse.startActiveGenerationStep({
               sessionID: event.data.sessionID,
@@ -173,13 +179,13 @@ const LangfusePlugin = {
           if (event.type === "session.text.ended") {
             generationDetails
               .get(event.data.assistantMessageID)
-              ?.text.push(event.data.text);
+              ?.content.push({ type: "text", text: event.data.text });
           }
 
           if (event.type === "session.reasoning.ended") {
             generationDetails
               .get(event.data.assistantMessageID)
-              ?.reasoning.push(event.data.text);
+              ?.content.push({ type: "reasoning", text: event.data.text });
           }
 
           if (event.type === "session.step.ended") {
@@ -206,18 +212,7 @@ const LangfusePlugin = {
               output: [
                 {
                   role: "assistant",
-                  content: details.text.join(""),
-                  ...(details.reasoning.length > 0
-                    ? {
-                        thinking: details.reasoning.map((content) => ({
-                          type: "thinking",
-                          content,
-                        })),
-                      }
-                    : {}),
-                  ...(details.toolCalls.size > 0
-                    ? { tool_calls: Array.from(details.toolCalls.values()) }
-                    : {}),
+                  content: details.content,
                 },
               ],
             });
