@@ -394,6 +394,7 @@ const completeGeneration = async (input: {
   started: number;
   completed: number;
   text?: string;
+  cost?: number;
 }) => {
   storeMessage(input.sessionID, {
     info: {
@@ -443,7 +444,7 @@ const completeGeneration = async (input: {
         providerID: "test-provider",
         path: { cwd: "/test", root: "/test" },
         finish: "stop",
-        cost: 0.01,
+        cost: input.cost ?? 0.01,
         tokens: {
           input: 10,
           output: 5,
@@ -3489,6 +3490,56 @@ describe("built plugin", { concurrent: false }, () => {
       tool_call_id: callID,
       content: "ENOENT: no such file or directory",
     });
+  });
+
+  test("omits cost_details when OpenCode reports zero cost", async () => {
+    const sessionID = "zero-cost-session";
+    const started = startedAt;
+
+    await sendUserMessage({
+      sessionID,
+      messageID: "zero-cost-user",
+      text: "Use a custom provider without OpenCode cost config",
+      started,
+    });
+    await startGeneration({
+      id: "zero-cost-step",
+      sessionID,
+      started: started + 100,
+    });
+    await completeGeneration({
+      sessionID,
+      userMessageID: "zero-cost-user",
+      assistantMessageID: "zero-cost-assistant-1",
+      started: started + 100,
+      completed: started + 500,
+      text: "Step output",
+      cost: 0,
+    });
+    await completeGeneration({
+      sessionID,
+      userMessageID: "zero-cost-user",
+      assistantMessageID: "zero-cost-assistant-2",
+      started: started + 600,
+      completed: started + 900,
+      text: "Fallback output",
+      cost: 0,
+    });
+
+    const { spans } = await flushSession(sessionID);
+    const generations = spans.filter(
+      (span) => span.name === "opencode.generation",
+    );
+
+    expect(generations).toHaveLength(2);
+    for (const generation of generations) {
+      expect(getAttributes(generation)).toHaveProperty(
+        "langfuse.observation.usage_details",
+      );
+      expect(getAttributes(generation)).not.toHaveProperty(
+        "langfuse.observation.cost_details",
+      );
+    }
   });
 
   test("can be disposed repeatedly", async () => {

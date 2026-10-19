@@ -758,10 +758,12 @@ export class LangfuseClient {
             input.tokens.input + input.tokens.output + input.tokens.reasoning,
         }),
       );
-      step.span.setAttribute(
-        "langfuse.observation.cost_details",
-        JSON.stringify({ total: input.cost }),
-      );
+      if (input.cost > 0) {
+        step.span.setAttribute(
+          "langfuse.observation.cost_details",
+          JSON.stringify({ total: input.cost }),
+        );
+      }
       step.span.setAttribute(
         "langfuse.observation.metadata",
         JSON.stringify({
@@ -821,9 +823,13 @@ export class LangfuseClient {
               input.tokens.total ??
               input.tokens.input + input.tokens.output + input.tokens.reasoning,
           }),
-          "langfuse.observation.cost_details": JSON.stringify({
-            total: input.cost,
-          }),
+          ...(input.cost > 0
+            ? {
+                "langfuse.observation.cost_details": JSON.stringify({
+                  total: input.cost,
+                }),
+              }
+            : {}),
           "langfuse.observation.metadata": JSON.stringify({
             messageID: input.messageID,
             parentID: input.parentID,
