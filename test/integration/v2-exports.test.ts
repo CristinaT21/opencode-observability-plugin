@@ -61,7 +61,7 @@ const getJsonAttribute = (span: typeof SpanSchema.Type, key: string) => {
   return Schema.decodeUnknownSync(Schema.parseJson(Schema.Unknown))(value);
 };
 
-test("exports V2 parallel tool responses with explicit IDs and no duplicate context results", async () => {
+test("keeps V2 tool calls and observations with their calling generations despite late and duplicate hooks", async () => {
   const spans: (typeof SpanSchema.Type)[] = [];
   const collectorErrors: unknown[] = [];
   const server = createServer((request, response) => {
@@ -159,6 +159,9 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
     Schema.decodeUnknownSync(SessionIDSchema)("v2-parallel-tools");
   const assistantMessageID =
     Schema.decodeUnknownSync(MessageIDSchema)("v2-tool-generation");
+  const followupMessageID =
+    Schema.decodeUnknownSync(MessageIDSchema)("v2-followup");
+  const followupCallID = CallID.make("v2-followup-call");
   const agent = Agent.ID.make("build");
   const model = {
     id: Model.ID.make("test-model"),
@@ -212,6 +215,7 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
           id: call.id,
           name: "read",
           input: { path: call.path },
+          providerExecuted: false,
         })),
       ],
     },
@@ -249,6 +253,7 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
           toolCallId: call.id,
           toolName: "read",
           input: { path: call.path },
+          providerExecuted: false,
         })),
       ],
     },
@@ -342,6 +347,42 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
               };
             }
             for (const call of calls) {
+              yield {
+                id: `v2-input-started-${call.id}`,
+                durable: {
+                  aggregateID: sessionID,
+                  seq: 4,
+                  version: 1 as const,
+                },
+                type: "session.tool.input.started",
+                created: Date.now(),
+                data: {
+                  sessionID,
+                  assistantMessageID,
+                  id: call.id,
+                  name: "read",
+                },
+              };
+              yield {
+                id: `v2-called-${call.id}`,
+                durable: {
+                  aggregateID: sessionID,
+                  seq: 5,
+                  version: 1 as const,
+                },
+                type: "session.tool.called",
+                created: Date.now(),
+                data: {
+                  sessionID,
+                  assistantMessageID,
+                  id: call.id,
+                  input: { path: call.path },
+                  executed: false,
+                },
+              };
+              if (call.status === "error") {
+                continue;
+              }
               await toolHooks.run("execute.before", {
                 sessionID,
                 messageID: assistantMessageID,
@@ -353,6 +394,9 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
             }
             // Same names and reversed completions must still match by call ID.
             for (const call of [...calls].reverse()) {
+              if (call.status === "error") {
+                continue;
+              }
               const input = {
                 sessionID,
                 messageID: assistantMessageID,
@@ -361,30 +405,19 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
                 id: call.id,
                 input: { path: call.path },
               };
-              const resultsByStatus = {
-                error: {
-                  ...input,
-                  status: "error" as const,
-                  error: new ToolError({ message: call.content }),
+              const result = {
+                ...input,
+                status: "completed",
+                result: {
+                  content:
+                    call.id === "v2-call-second"
+                      ? [
+                          { type: "text", text: "Second" },
+                          { type: "text", text: "response" },
+                        ]
+                      : call.content,
                 },
-                completed: {
-                  ...input,
-                  status: "completed" as const,
-                  result: {
-                    content:
-                      call.id === "v2-call-second"
-                        ? [
-                            { type: "text" as const, text: "Second" },
-                            { type: "text" as const, text: "response" },
-                          ]
-                        : call.content,
-                  },
-                },
-              } satisfies Record<
-                (typeof calls)[number]["status"],
-                Parameters<ToolHook>[0]
-              >;
-              const result = resultsByStatus[call.status];
+              } satisfies Parameters<ToolHook>[0];
               await toolHooks.run("execute.after", result);
               await toolHooks.run("execute.after", result);
             }
@@ -417,11 +450,81 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
               created: Date.now(),
               data: {
                 sessionID,
-                assistantMessageID: "v2-followup",
+                assistantMessageID: followupMessageID,
                 agent,
                 model,
               },
             };
+            // A late first-generation hook must not attach to the active followup.
+            for (const call of calls.filter(
+              (call) => call.status === "error",
+            )) {
+              const input = {
+                sessionID,
+                messageID: assistantMessageID,
+                agent,
+                tool: "read",
+                id: call.id,
+                input: { path: call.path },
+              };
+              await toolHooks.run("execute.before", input);
+              await toolHooks.run("execute.before", input);
+              const result = {
+                ...input,
+                status: "error" as const,
+                error: new ToolError({ message: call.content }),
+              };
+              await toolHooks.run("execute.after", result);
+              await toolHooks.run("execute.after", result);
+              yield {
+                id: `v2-late-called-${call.id}`,
+                durable: {
+                  aggregateID: sessionID,
+                  seq: 6,
+                  version: 1 as const,
+                },
+                type: "session.tool.called",
+                created: Date.now(),
+                data: {
+                  sessionID,
+                  assistantMessageID,
+                  id: call.id,
+                  input: { path: call.path },
+                  executed: false,
+                },
+              };
+            }
+            yield {
+              id: "v2-followup-input-started",
+              durable: { aggregateID: sessionID, seq: 7, version: 1 as const },
+              type: "session.tool.input.started",
+              created: Date.now(),
+              data: {
+                sessionID,
+                assistantMessageID: followupMessageID,
+                id: followupCallID,
+                name: "bash",
+              },
+            };
+            for (let repeat = 0; repeat < 2; repeat++) {
+              yield {
+                id: "v2-followup-called",
+                durable: {
+                  aggregateID: sessionID,
+                  seq: 8,
+                  version: 1 as const,
+                },
+                type: "session.tool.called",
+                created: Date.now(),
+                data: {
+                  sessionID,
+                  assistantMessageID: followupMessageID,
+                  id: followupCallID,
+                  input: { command: "pwd" },
+                  executed: false,
+                },
+              };
+            }
             yield {
               id: "v2-followup-ended",
               durable: { aggregateID: sessionID, seq: 4, version: 1 as const },
@@ -429,12 +532,29 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
               created: Date.now(),
               data: {
                 sessionID,
-                assistantMessageID: "v2-followup",
-                finish: "stop",
+                assistantMessageID: followupMessageID,
+                finish: "tool-calls",
                 cost: 0,
                 tokens,
               },
             };
+            const followupToolInput = {
+              sessionID,
+              messageID: followupMessageID,
+              agent,
+              tool: "bash",
+              id: followupCallID,
+              input: { command: "pwd" },
+            };
+            await toolHooks.run("execute.before", followupToolInput);
+            await toolHooks.run("execute.before", followupToolInput);
+            const followupToolResult = {
+              ...followupToolInput,
+              status: "completed" as const,
+              result: { content: "/project" },
+            };
+            await toolHooks.run("execute.after", followupToolResult);
+            await toolHooks.run("execute.after", followupToolResult);
             yield {
               id: "v2-execution-succeeded",
               durable: { aggregateID: sessionID, seq: 5, version: 1 as const },
@@ -527,9 +647,15 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
     (span) => span.name === "opencode.generation",
   );
   expect(generations).toHaveLength(2);
-  const generation = generations.find(
-    (span) => span.spanId === tools[0].parentSpanId,
-  );
+  const generation = generations.find((span) => {
+    const metadata = getJsonAttribute(span, "langfuse.observation.metadata");
+    return (
+      typeof metadata === "object" &&
+      metadata !== null &&
+      "messageID" in metadata &&
+      metadata.messageID === assistantMessageID
+    );
+  });
   const followup = generations.find((span) => span !== generation);
   if (!generation || !followup) {
     throw new Error("Expected both generations");
@@ -537,6 +663,34 @@ test("exports V2 parallel tool responses with explicit IDs and no duplicate cont
   expect(getJsonAttribute(generation, "langfuse.observation.output")).toEqual([
     exportedMessages[1],
   ]);
+  expect(
+    getJsonAttribute(followup, "langfuse.observation.metadata"),
+  ).toMatchObject({ messageID: followupMessageID });
+  expect(getJsonAttribute(followup, "langfuse.observation.output")).toEqual([
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "tool-call",
+          toolCallId: followupCallID,
+          toolName: "bash",
+          input: { command: "pwd" },
+          providerExecuted: false,
+        },
+      ],
+    },
+  ]);
+  const followupTools = spans.filter((span) => span.name === "bash");
+  expect(followupTools).toHaveLength(1);
+  expect(followupTools[0].parentSpanId).toBe(followup.spanId);
+  expect(
+    getJsonAttribute(followupTools[0], "langfuse.observation.output"),
+  ).toEqual({
+    role: "tool",
+    name: "bash",
+    tool_call_id: followupCallID,
+    content: "/project",
+  });
   for (const [index, call] of calls.entries()) {
     const tool = tools.find((span) => {
       const output = getJsonAttribute(span, "langfuse.observation.output");
