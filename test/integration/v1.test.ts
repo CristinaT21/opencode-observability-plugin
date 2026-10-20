@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingHttpHeaders, Server } from "node:http";
+import { gunzipSync } from "node:zlib";
 
 import { trace } from "@opentelemetry/api";
 import LangfusePlugin from "@langfuse/opencode-observability-plugin/v1";
@@ -540,13 +541,18 @@ beforeEach(async () => {
     });
     request.on("end", () => {
       try {
+        const body = Buffer.concat(chunks);
+        const decodedBody =
+          request.headers["content-encoding"] === "gzip"
+            ? gunzipSync(body)
+            : body;
         requests.push({
           method: request.method,
           url: request.url,
           headers: request.headers,
           body: Schema.decodeUnknownSync(
             Schema.parseJson(CapturedRequestBodySchema),
-          )(Buffer.concat(chunks).toString("utf8")),
+          )(decodedBody.toString("utf8")),
         });
         response.writeHead(collectorStatus, {
           "content-type": "application/json",

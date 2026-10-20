@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { gunzipSync } from "node:zlib";
 
 import CombinedPlugin from "@langfuse/opencode-observability-plugin";
 import LangfusePlugin from "@langfuse/opencode-observability-plugin/v2";
@@ -177,8 +178,13 @@ async function createCollector() {
     });
     request.on("end", () => {
       try {
+        const body = Buffer.concat(chunks);
+        const decodedBody =
+          request.headers["content-encoding"] === "gzip"
+            ? gunzipSync(body)
+            : body;
         const payload = Schema.decodeUnknownSync(PayloadSchema)(
-          Buffer.concat(chunks).toString("utf8"),
+          decodedBody.toString("utf8"),
         );
         spans.push(
           ...payload.resourceSpans.flatMap((resource) =>
