@@ -13,6 +13,7 @@ import { Schema } from "effect";
 import { beforeEach, describe, expect, onTestFinished, test, vi } from "vitest";
 
 import SourcePlugin from "../../src/v2.js";
+import { PLUGIN_VERSION } from "../../src/version.js";
 
 type PluginContext = Parameters<typeof LangfusePlugin.setup>[0];
 type ToolHook = Parameters<PluginContext["tool"]["hook"]>[1];
@@ -31,6 +32,7 @@ const MessageIDSchema = Schema.declare(
 
 const SpanSchema = Schema.Struct({
   name: Schema.String,
+  traceId: Schema.String,
   spanId: Schema.String,
   parentSpanId: Schema.optional(Schema.String),
   attributes: Schema.Array(
@@ -71,7 +73,12 @@ function createPluginContext(input: {
   sessionHook: PluginContext["session"]["hook"];
   toolHook: PluginContext["tool"]["hook"];
   subscribe: PluginContext["event"]["subscribe"];
+  storage?: PluginContext["storage"];
 }) {
+  const stored = new Map<
+    string,
+    Parameters<PluginContext["storage"]["set"]>[1]
+  >();
   const unexpectedApi = () => {
     throw new Error("The plugin used an unsupported mock host capability");
   };
@@ -150,8 +157,25 @@ function createPluginContext(input: {
     get skill() {
       return unexpectedApi();
     },
-    get storage() {
-      return unexpectedApi();
+    storage: input.storage ?? {
+      get: (key) => Promise.resolve(stored.get(key)),
+      set: (key, value) => {
+        stored.set(key, structuredClone(value));
+        return Promise.resolve();
+      },
+      remove: (key) => {
+        stored.delete(key);
+        return Promise.resolve();
+      },
+      scan: ({ prefix, after }) =>
+        Promise.resolve({
+          entries: [...stored]
+            .filter(
+              ([key]) =>
+                key.startsWith(prefix) && (after === undefined || key > after),
+            )
+            .map(([key, value]) => ({ key, value })),
+        }),
     },
     get vcs() {
       return unexpectedApi();
@@ -262,6 +286,216 @@ const createHookRegistry = <Inputs extends object>() => {
     },
   };
 };
+
+test("restores durable parents for in-flight tools, later tools, and generation continuations after replacement", async () => {
+  const { spans, collectorErrors } = await createCollector();
+  const sessionHooks = createHookRegistry<SessionHookInputs>();
+  const toolHooks = createHookRegistry<ToolHookInputs>();
+  const admitted = Promise.withResolvers<undefined>();
+  const firstEventsFinished = Promise.withResolvers<undefined>();
+  const continueExecution = Promise.withResolvers<undefined>();
+  const secondEventsFinished = Promise.withResolvers<undefined>();
+  const sessionID =
+    Schema.decodeUnknownSync(SessionIDSchema)("durable-session");
+  const messageID =
+    Schema.decodeUnknownSync(MessageIDSchema)("durable-generation");
+  const followupID =
+    Schema.decodeUnknownSync(MessageIDSchema)("durable-followup");
+  const model = {
+    id: Model.ID.make("test-model"),
+    providerID: Provider.ID.make("test-provider"),
+  };
+  const agent = Agent.ID.make("build");
+  const tokens = {
+    input: 10,
+    output: 5,
+    reasoning: 0,
+    cache: { read: 0, write: 0 },
+  };
+  let instance = 0;
+  const context = createPluginContext({
+    sessionHook: sessionHooks.register,
+    toolHook: toolHooks.register,
+    subscribe: () => ({
+      async *[Symbol.asyncIterator]() {
+        const first = instance++ === 0;
+        await (first ? admitted.promise : continueExecution.promise);
+        const assistantMessageID = first ? messageID : followupID;
+        yield {
+          type: "session.step.started",
+          id: `start-${assistantMessageID}`,
+          created: Date.now(),
+          durable: { aggregateID: sessionID, seq: 1, version: 1 as const },
+          data: { sessionID, assistantMessageID, agent, model },
+        };
+        yield {
+          type: "session.step.ended",
+          id: `end-${assistantMessageID}`,
+          created: Date.now(),
+          durable: { aggregateID: sessionID, seq: 2, version: 1 as const },
+          data: {
+            sessionID,
+            assistantMessageID,
+            finish: "tool-calls",
+            cost: 0,
+            tokens,
+          },
+        };
+        if (!first) {
+          yield {
+            type: "session.deleted",
+            id: "deleted",
+            created: Date.now(),
+            durable: { aggregateID: sessionID, seq: 3, version: 2 as const },
+            data: { sessionID },
+          };
+        }
+        (first ? firstEventsFinished : secondEventsFinished).resolve(undefined);
+      },
+    }),
+  });
+  const firstCleanup = await LangfusePlugin.setup(context);
+  const previousVersionKey = `langfuse.observability/tracing/previous-version/${sessionID}/turn`;
+  const otherPluginKey = `other-plugin/tracing/${PLUGIN_VERSION}/${sessionID}/turn`;
+  await context.storage.set(otherPluginKey, "other-plugin-context");
+  await context.storage.set(previousVersionKey, "previous-version-context");
+  await sessionHooks.run("prompt", {
+    sessionID,
+    messageID: Schema.decodeUnknownSync(MessageIDSchema)("durable-user"),
+    prompt: { text: "Run tools" },
+    delivery: "steer",
+  });
+  admitted.resolve(undefined);
+  await firstEventsFinished.promise;
+  const call = {
+    id: CallID.make("durable-in-flight"),
+    messageID,
+    sessionID,
+    agent,
+    tool: "shell",
+    input: { command: "pwd" },
+  };
+  await toolHooks.run("execute.before", call);
+  await firstCleanup?.();
+
+  expect(
+    typeof (await context.storage.get(
+      `langfuse.observability/tracing/${PLUGIN_VERSION}/${sessionID}/generation/${messageID}`,
+    )),
+  ).toBe("string");
+  // Disposal cleared the shared client's parent maps, so restoration must use storage.
+  const secondCleanup = await LangfusePlugin.setup(context);
+  await toolHooks.run("execute.after", {
+    ...call,
+    status: "completed",
+    result: { content: "/project" },
+  });
+  const later = { ...call, id: CallID.make("durable-later") };
+  await toolHooks.run("execute.before", later);
+  await toolHooks.run("execute.after", {
+    ...later,
+    status: "error",
+    error: new ToolError({ message: "failed" }),
+  });
+  continueExecution.resolve(undefined);
+  await secondEventsFinished.promise;
+  await secondCleanup?.();
+
+  expect(collectorErrors).toEqual([]);
+  const generations = spans.filter(
+    (span) => span.name === "opencode.generation",
+  );
+  expect(generations).toHaveLength(2);
+  const turn = spans.find((span) => span.name === "opencode.turn");
+  expect(turn).toBeDefined();
+  for (const generation of generations) {
+    expect(generation.parentSpanId).toBe(turn?.spanId);
+    expect(generation.traceId).toBe(turn?.traceId);
+  }
+  const completedTools = spans.filter(
+    (span) =>
+      span.name === "shell" &&
+      span.attributes.some(
+        (attribute) => attribute.key === "langfuse.observation.output",
+      ),
+  );
+  expect(completedTools).toHaveLength(2);
+  for (const tool of completedTools) {
+    expect(tool.traceId).toBe(generations[0].traceId);
+    expect(tool.parentSpanId).toBe(generations[0].spanId);
+  }
+  expect(
+    await context.storage.scan({
+      prefix: `langfuse.observability/tracing/${PLUGIN_VERSION}/${sessionID}/`,
+    }),
+  ).toEqual({ entries: [] });
+  expect(await context.storage.get(previousVersionKey)).toBe(
+    "previous-version-context",
+  );
+  expect(await context.storage.get(otherPluginKey)).toBe(
+    "other-plugin-context",
+  );
+});
+
+test.each([
+  "invalid-json",
+  JSON.stringify({
+    generation: { traceId: "invalid", spanId: "invalid", traceFlags: 1 },
+  }),
+  { generation: "legacy-unencoded-context" },
+])("ignores malformed stored parent contexts: %j", async (stored) => {
+  const { spans, collectorErrors } = await createCollector();
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  onTestFinished(() => {
+    warning.mockRestore();
+  });
+  const sessionHooks = createHookRegistry<SessionHookInputs>();
+  const toolHooks = createHookRegistry<ToolHookInputs>();
+  const context = createPluginContext({
+    sessionHook: sessionHooks.register,
+    toolHook: toolHooks.register,
+    subscribe: () => ({
+      async *[Symbol.asyncIterator]() {
+        await Promise.resolve();
+        yield* [];
+      },
+    }),
+  });
+  const sessionID = Schema.decodeUnknownSync(SessionIDSchema)(
+    "invalid-context-session",
+  );
+  const messageID = Schema.decodeUnknownSync(MessageIDSchema)(
+    "invalid-context-message",
+  );
+  await context.storage.set(
+    `langfuse.observability/tracing/${PLUGIN_VERSION}/${sessionID}/generation/${messageID}`,
+    stored,
+  );
+  const cleanup = await LangfusePlugin.setup(context);
+  const call = {
+    id: CallID.make("invalid-context-call"),
+    sessionID,
+    messageID,
+    agent: Agent.ID.make("build"),
+    tool: "shell",
+    input: { command: "pwd" },
+  };
+  await toolHooks.run("execute.before", call);
+  await toolHooks.run("execute.after", {
+    ...call,
+    status: "completed",
+    result: { content: "/project" },
+  });
+  await cleanup?.();
+  expect(warning).toHaveBeenCalled();
+  expect(collectorErrors).toEqual([]);
+  const tools = spans.filter((span) => span.name === "shell");
+  expect(tools).toHaveLength(1);
+  expect(tools[0].parentSpanId).toBeUndefined();
+  expect(
+    getJsonAttribute(tools[0], "langfuse.observation.output"),
+  ).toMatchObject({ content: "/project" });
+});
 
 test("keeps V2 tool calls and observations with their calling generations despite late and duplicate hooks", async () => {
   const { spans, collectorErrors } = await createCollector();
@@ -848,6 +1082,8 @@ test("omits V2 cost_details when OpenCode reports zero cost", async () => {
 
 const runtime = vi.hoisted(() => ({
   createLangfuseRuntime: vi.fn(),
+  getTraceContext: vi.fn(() => ({})),
+  restoreTraceContext: vi.fn(),
   traceUserPrompt: vi.fn(),
   setGenerationInputSnapshot: vi.fn(),
   rememberToolCall: vi.fn(),

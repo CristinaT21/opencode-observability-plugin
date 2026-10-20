@@ -1,9 +1,24 @@
 import type { Plugin } from "@opencode/plugin";
 import type { SessionHooks } from "@opencode/plugin/promise/session";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 
 import type { ToolDefinition } from "./langfuse.js";
 import { createLangfuseRuntime } from "./runtime.js";
+import { PLUGIN_VERSION } from "./version.js";
+
+const SpanContextSchema = Schema.Struct({
+  traceId: Schema.String.pipe(Schema.pattern(/^(?!0{32}$)[0-9a-f]{32}$/)),
+  spanId: Schema.String.pipe(Schema.pattern(/^(?!0{16}$)[0-9a-f]{16}$/)),
+  traceFlags: Schema.Number.pipe(Schema.int(), Schema.between(0, 255)),
+});
+const TraceContextSchema = Schema.parseJson(
+  Schema.Struct({
+    turn: Schema.optional(SpanContextSchema),
+    generation: Schema.optional(SpanContextSchema),
+  }),
+);
+const PLUGIN_ID = "langfuse.observability";
+const traceStoragePrefix = `${PLUGIN_ID}/tracing/${PLUGIN_VERSION}`;
 
 function formatMessages(messages: SessionHooks["context"]["messages"]) {
   return messages.map((message) => ({
@@ -32,7 +47,7 @@ function formatMessages(messages: SessionHooks["context"]["messages"]) {
 }
 
 const LangfusePlugin = {
-  id: "langfuse.observability",
+  id: PLUGIN_ID,
   async setup(ctx) {
     const disableTracing = (error: { readonly message: string }) =>
       Effect.sync(() => {
@@ -47,6 +62,51 @@ const LangfusePlugin = {
     if (!langfuse) {
       return;
     }
+
+    // Storage survives plugin replacement; live spans and event subscriptions do not.
+    const restoreTraceContext = async (
+      sessionID: string,
+      messageID: string | undefined,
+    ) => {
+      try {
+        const key =
+          messageID !== undefined ? `generation/${messageID}` : "turn";
+        const stored = await ctx.storage.get(
+          `${traceStoragePrefix}/${sessionID}/${key}`,
+        );
+        if (stored !== undefined) {
+          langfuse.restoreTraceContext({
+            sessionID,
+            messageID,
+            context: Schema.decodeUnknownSync(TraceContextSchema)(stored),
+          });
+        }
+      } catch (error) {
+        console.warn(
+          `Langfuse parent context restore failed: ${String(error)}`,
+        );
+      }
+    };
+    const persistTraceContext = async (
+      sessionID: string,
+      messageID: string | undefined,
+    ) => {
+      try {
+        const key =
+          messageID !== undefined ? `generation/${messageID}` : "turn";
+        const context = langfuse.getTraceContext(sessionID, messageID);
+        if (context.turn || context.generation) {
+          await ctx.storage.set(
+            `${traceStoragePrefix}/${sessionID}/${key}`,
+            Schema.encodeSync(TraceContextSchema)(context),
+          );
+        }
+      } catch (error) {
+        console.warn(
+          `Langfuse parent context persistence failed: ${String(error)}`,
+        );
+      }
+    };
 
     const abort = new AbortController();
     const registrations: { dispose: () => Promise<void> }[] = [];
@@ -64,7 +124,7 @@ const LangfusePlugin = {
     >();
 
     registrations.push(
-      await ctx.session.hook("prompt", (input) => {
+      await ctx.session.hook("prompt", async (input) => {
         userMessageIDs.set(input.sessionID, input.messageID);
         langfuse.traceUserPrompt({
           sessionID: input.sessionID,
@@ -82,6 +142,7 @@ const LangfusePlugin = {
             })),
           ],
         });
+        await persistTraceContext(input.sessionID, undefined);
       }),
     );
 
@@ -103,7 +164,9 @@ const LangfusePlugin = {
     );
 
     registrations.push(
-      await ctx.tool.hook("execute.before", (input) => {
+      await ctx.tool.hook("execute.before", async (input) => {
+        await restoreTraceContext(input.sessionID, input.messageID);
+        await restoreTraceContext(input.sessionID, undefined);
         const content = generationDetails.get(input.messageID)?.content;
         if (
           content &&
@@ -137,11 +200,14 @@ const LangfusePlugin = {
           tool: input.tool,
           args: input.input,
         });
+        await persistTraceContext(input.sessionID, input.messageID);
       }),
     );
 
     registrations.push(
-      await ctx.tool.hook("execute.after", (input) => {
+      await ctx.tool.hook("execute.after", async (input) => {
+        await restoreTraceContext(input.sessionID, input.messageID);
+        await restoreTraceContext(input.sessionID, undefined);
         if (input.status === "error") {
           langfuse.traceToolError({
             sessionID: input.sessionID,
@@ -188,6 +254,7 @@ const LangfusePlugin = {
           }
 
           if (event.type === "session.step.started") {
+            await restoreTraceContext(event.data.sessionID, undefined);
             generationDetails.set(event.data.assistantMessageID, {
               sessionID: event.data.sessionID,
               agent: event.data.agent,
@@ -204,6 +271,10 @@ const LangfusePlugin = {
               started: event.created,
               snapshot: event.data.snapshot,
             });
+            await persistTraceContext(
+              event.data.sessionID,
+              event.data.assistantMessageID,
+            );
           }
 
           if (event.type === "session.text.ended") {
@@ -336,6 +407,23 @@ const LangfusePlugin = {
 
           if (event.type === "session.deleted") {
             langfuse.clearSessionTraceState(event.data.sessionID);
+            try {
+              let after: string | undefined;
+              do {
+                const page = await ctx.storage.scan({
+                  prefix: `${traceStoragePrefix}/${event.data.sessionID}/`,
+                  ...(after !== undefined ? { after } : {}),
+                });
+                await Promise.all(
+                  page.entries.map(({ key }) => ctx.storage.remove(key)),
+                );
+                after = page.next;
+              } while (after !== undefined);
+            } catch (error) {
+              console.warn(
+                `Langfuse parent context cleanup failed: ${String(error)}`,
+              );
+            }
           }
         }
       } catch (error) {

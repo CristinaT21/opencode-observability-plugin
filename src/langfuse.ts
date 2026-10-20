@@ -66,6 +66,60 @@ export class LangfuseClient {
     this.traceState.pendingUserMessageIdsBySession.clear();
   }
 
+  getTraceContext(sessionID: string, messageID: string | undefined) {
+    const turn = this.getTurnObservation(sessionID, undefined);
+    const generation =
+      (messageID != null
+        ? this.traceState.generationSpansByMessageId.get(messageID)
+        : undefined) ?? this.traceState.generationParentSpans.get(sessionID);
+    const turnContext = turn?.span.spanContext();
+    const generationContext = generation?.spanContext();
+    return {
+      ...(turnContext
+        ? {
+            turn: {
+              traceId: turnContext.traceId,
+              spanId: turnContext.spanId,
+              traceFlags: turnContext.traceFlags,
+            },
+          }
+        : {}),
+      ...(generationContext
+        ? {
+            generation: {
+              traceId: generationContext.traceId,
+              spanId: generationContext.spanId,
+              traceFlags: generationContext.traceFlags,
+            },
+          }
+        : {}),
+    };
+  }
+
+  restoreTraceContext(input: {
+    sessionID: string;
+    messageID?: string;
+    context: ReturnType<LangfuseClient["getTraceContext"]>;
+  }) {
+    if (
+      input.context.turn &&
+      !this.traceState.latestTurnObservationsBySession.has(input.sessionID)
+    ) {
+      this.traceState.latestTurnObservationsBySession.set(input.sessionID, {
+        sessionID: input.sessionID,
+        span: trace.wrapSpanContext(input.context.turn),
+      });
+    }
+    if (input.context.generation && input.messageID != null) {
+      if (!this.traceState.generationSpansByMessageId.has(input.messageID)) {
+        this.traceState.generationSpansByMessageId.set(
+          input.messageID,
+          trace.wrapSpanContext(input.context.generation),
+        );
+      }
+    }
+  }
+
   clearSessionTraceState(sessionID: string) {
     for (const [messageID, parent] of this.assistantParents) {
       if (parent.sessionID === sessionID) {
@@ -996,7 +1050,15 @@ export class LangfuseClient {
       return;
     }
 
-    this.ensureGenerationParent(input.sessionID);
+    const messageID =
+      input.messageID ??
+      this.traceState.toolMessageIdsByCallId.get(input.callID);
+    if (
+      messageID == null ||
+      !this.traceState.generationSpansByMessageId.has(messageID)
+    ) {
+      this.ensureGenerationParent(input.sessionID);
+    }
 
     this.withObservationParent(
       input.sessionID,
@@ -1022,8 +1084,7 @@ export class LangfuseClient {
           tool: input.tool,
         });
       },
-      input.messageID ??
-        this.traceState.toolMessageIdsByCallId.get(input.callID),
+      messageID,
     );
   }
 
