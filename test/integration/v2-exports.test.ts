@@ -5,6 +5,7 @@ import { Agent, Model, Provider } from "@opencode/plugin";
 import type { Hooks } from "@opencode/plugin/promise/registration";
 import type { SessionHooks as SessionHookInputs } from "@opencode/plugin/promise/session";
 import { CallID, Error as ToolError } from "@opencode/plugin/promise/tool";
+import { trace } from "@opentelemetry/api";
 import { Schema } from "effect";
 import { expect, onTestFinished, test, vi } from "vitest";
 
@@ -61,7 +62,105 @@ const getJsonAttribute = (span: typeof SpanSchema.Type, key: string) => {
   return Schema.decodeUnknownSync(Schema.parseJson(Schema.Unknown))(value);
 };
 
-test("keeps V2 tool calls and observations with their calling generations despite late and duplicate hooks", async () => {
+function createPluginContext(input: {
+  sessionHook: PluginContext["session"]["hook"];
+  toolHook: PluginContext["tool"]["hook"];
+  subscribe: PluginContext["event"]["subscribe"];
+}) {
+  const unexpectedApi = () => {
+    throw new Error("The plugin used an unsupported mock host capability");
+  };
+  return {
+    app: { name: "opencode", version: "2.0.4", channel: "stable" },
+    session: {
+      hook: input.sessionHook,
+      create: unexpectedApi,
+      get: unexpectedApi,
+      switchAgent: unexpectedApi,
+      switchModel: unexpectedApi,
+      prompt: unexpectedApi,
+      generate: unexpectedApi,
+      command: unexpectedApi,
+      synthetic: unexpectedApi,
+      interrupt: unexpectedApi,
+      update: unexpectedApi,
+      move: unexpectedApi,
+      wait: unexpectedApi,
+      context: unexpectedApi,
+    },
+    tool: {
+      hook: input.toolHook,
+      transform: unexpectedApi,
+      reload: unexpectedApi,
+    },
+    event: { subscribe: input.subscribe },
+    get location() {
+      return unexpectedApi();
+    },
+    get options() {
+      return unexpectedApi();
+    },
+    get agent() {
+      return unexpectedApi();
+    },
+    get aisdk() {
+      return unexpectedApi();
+    },
+    get command() {
+      return unexpectedApi();
+    },
+    get experimental() {
+      return unexpectedApi();
+    },
+    get integration() {
+      return unexpectedApi();
+    },
+    get mcp() {
+      return unexpectedApi();
+    },
+    get model() {
+      return unexpectedApi();
+    },
+    get generate() {
+      return unexpectedApi();
+    },
+    get permission() {
+      return unexpectedApi();
+    },
+    get plugin() {
+      return unexpectedApi();
+    },
+    get provider() {
+      return unexpectedApi();
+    },
+    get reference() {
+      return unexpectedApi();
+    },
+    get rpc() {
+      return unexpectedApi();
+    },
+    get shell() {
+      return unexpectedApi();
+    },
+    get skill() {
+      return unexpectedApi();
+    },
+    get storage() {
+      return unexpectedApi();
+    },
+    get vcs() {
+      return unexpectedApi();
+    },
+    get websearch() {
+      return unexpectedApi();
+    },
+    get worktree() {
+      return unexpectedApi();
+    },
+  } satisfies PluginContext;
+}
+
+async function createCollector() {
   const spans: (typeof SpanSchema.Type)[] = [];
   const collectorErrors: unknown[] = [];
   const server = createServer((request, response) => {
@@ -103,6 +202,8 @@ test("keeps V2 tool calls and observations with their calling generations despit
         });
       });
     } finally {
+      trace.disable();
+      globalThis.langfuseOpencodeRuntimeState = undefined;
       vi.unstubAllEnvs();
     }
   });
@@ -122,35 +223,38 @@ test("keeps V2 tool calls and observations with their calling generations despit
   );
   vi.stubEnv("LANGFUSE_ENVIRONMENT", "integration-test");
 
-  const createHookRegistry = <Inputs extends object>() => {
-    const hooks: {
-      [Name in keyof Inputs]?: (input: Inputs[Name]) => Promise<void> | void;
-    } = {};
-    return {
-      register: <Name extends keyof Inputs>(
-        name: Name,
-        handler: (input: Inputs[Name]) => Promise<void> | void,
-      ) => {
-        hooks[name] = handler;
-        return Promise.resolve({
-          dispose: () => {
-            hooks[name] = undefined;
-            return Promise.resolve();
-          },
-        });
-      },
-      run: async <Name extends keyof Inputs>(
-        name: Name,
-        input: Inputs[Name],
-      ) => {
-        const handler = hooks[name];
-        if (!handler) {
-          throw new Error(`Expected hook ${String(name)}`);
-        }
-        await handler(input);
-      },
-    };
+  return { spans, collectorErrors };
+}
+
+const createHookRegistry = <Inputs extends object>() => {
+  const hooks: {
+    [Name in keyof Inputs]?: (input: Inputs[Name]) => Promise<void> | void;
+  } = {};
+  return {
+    register: <Name extends keyof Inputs>(
+      name: Name,
+      handler: (input: Inputs[Name]) => Promise<void> | void,
+    ) => {
+      hooks[name] = handler;
+      return Promise.resolve({
+        dispose: () => {
+          hooks[name] = undefined;
+          return Promise.resolve();
+        },
+      });
+    },
+    run: async <Name extends keyof Inputs>(name: Name, input: Inputs[Name]) => {
+      const handler = hooks[name];
+      if (!handler) {
+        throw new Error(`Expected hook ${String(name)}`);
+      }
+      await handler(input);
+    },
   };
+};
+
+test("keeps V2 tool calls and observations with their calling generations despite late and duplicate hooks", async () => {
+  const { spans, collectorErrors } = await createCollector();
   const sessionHooks = createHookRegistry<SessionHookInputs>();
   const toolHooks = createHookRegistry<ToolHookInputs>();
   const eventsFinished = Promise.withResolvers<undefined>();
@@ -273,365 +377,275 @@ test("keeps V2 tool calls and observations with their calling generations despit
       ],
     })),
   ];
-  const unexpectedApi = () => {
-    throw new Error("The plugin used an unsupported mock host capability");
-  };
-  const contextInput = {
-    app: { name: "opencode", version: "2.0.4", channel: "stable" },
-    session: {
-      hook: sessionHooks.register,
-      create: unexpectedApi,
-      get: unexpectedApi,
-      switchAgent: unexpectedApi,
-      switchModel: unexpectedApi,
-      prompt: unexpectedApi,
-      generate: unexpectedApi,
-      command: unexpectedApi,
-      synthetic: unexpectedApi,
-      interrupt: unexpectedApi,
-      update: unexpectedApi,
-      move: unexpectedApi,
-      wait: unexpectedApi,
-      context: unexpectedApi,
-    },
-    tool: {
-      hook: toolHooks.register,
-      transform: unexpectedApi,
-      reload: unexpectedApi,
-    },
-    event: {
-      subscribe: () => ({
-        async *[Symbol.asyncIterator]() {
-          try {
-            await sessionHooks.run("prompt", {
+  const contextInput = createPluginContext({
+    sessionHook: sessionHooks.register,
+    toolHook: toolHooks.register,
+    subscribe: () => ({
+      async *[Symbol.asyncIterator]() {
+        try {
+          await sessionHooks.run("prompt", {
+            sessionID,
+            messageID: Schema.decodeUnknownSync(MessageIDSchema)("v2-user"),
+            prompt: { text: "Read three files" },
+            delivery: "steer",
+          });
+          yield {
+            id: "v2-tools-started",
+            durable: { aggregateID: sessionID, seq: 1, version: 1 as const },
+            type: "session.step.started",
+            created: Date.now(),
+            data: { sessionID, assistantMessageID, agent, model },
+          };
+          yield {
+            id: "v2-reasoning-ended",
+            durable: { aggregateID: sessionID, seq: 2, version: 1 as const },
+            type: "session.reasoning.ended",
+            created: Date.now(),
+            data: {
               sessionID,
-              messageID: Schema.decodeUnknownSync(MessageIDSchema)("v2-user"),
-              prompt: { text: "Read three files" },
-              delivery: "steer",
+              assistantMessageID,
+              ordinal: 0,
+              text: "Need the files",
+            },
+          };
+          for (const text of ["Reading first. ", "Reading the rest."]) {
+            yield {
+              id: `v2-text-ended-${text}`,
+              durable: {
+                aggregateID: sessionID,
+                seq: 3,
+                version: 1 as const,
+              },
+              type: "session.text.ended",
+              created: Date.now(),
+              data: {
+                sessionID,
+                assistantMessageID,
+                ordinal: text === "Reading first. " ? 1 : 2,
+                text,
+              },
+            };
+          }
+          for (const call of calls) {
+            yield {
+              id: `v2-input-started-${call.id}`,
+              durable: {
+                aggregateID: sessionID,
+                seq: 4,
+                version: 1 as const,
+              },
+              type: "session.tool.input.started",
+              created: Date.now(),
+              data: {
+                sessionID,
+                assistantMessageID,
+                id: call.id,
+                name: "read",
+              },
+            };
+            yield {
+              id: `v2-called-${call.id}`,
+              durable: {
+                aggregateID: sessionID,
+                seq: 5,
+                version: 1 as const,
+              },
+              type: "session.tool.called",
+              created: Date.now(),
+              data: {
+                sessionID,
+                assistantMessageID,
+                id: call.id,
+                input: { path: call.path },
+                executed: false,
+              },
+            };
+            if (call.status === "error") {
+              continue;
+            }
+            await toolHooks.run("execute.before", {
+              sessionID,
+              messageID: assistantMessageID,
+              agent,
+              tool: "read",
+              id: call.id,
+              input: { path: call.path },
             });
-            yield {
-              id: "v2-tools-started",
-              durable: { aggregateID: sessionID, seq: 1, version: 1 as const },
-              type: "session.step.started",
-              created: Date.now(),
-              data: { sessionID, assistantMessageID, agent, model },
-            };
-            yield {
-              id: "v2-reasoning-ended",
-              durable: { aggregateID: sessionID, seq: 2, version: 1 as const },
-              type: "session.reasoning.ended",
-              created: Date.now(),
-              data: {
-                sessionID,
-                assistantMessageID,
-                ordinal: 0,
-                text: "Need the files",
-              },
-            };
-            for (const text of ["Reading first. ", "Reading the rest."]) {
-              yield {
-                id: `v2-text-ended-${text}`,
-                durable: {
-                  aggregateID: sessionID,
-                  seq: 3,
-                  version: 1 as const,
-                },
-                type: "session.text.ended",
-                created: Date.now(),
-                data: {
-                  sessionID,
-                  assistantMessageID,
-                  ordinal: text === "Reading first. " ? 1 : 2,
-                  text,
-                },
-              };
+          }
+          // Same names and reversed completions must still match by call ID.
+          for (const call of [...calls].reverse()) {
+            if (call.status === "error") {
+              continue;
             }
-            for (const call of calls) {
-              yield {
-                id: `v2-input-started-${call.id}`,
-                durable: {
-                  aggregateID: sessionID,
-                  seq: 4,
-                  version: 1 as const,
-                },
-                type: "session.tool.input.started",
-                created: Date.now(),
-                data: {
-                  sessionID,
-                  assistantMessageID,
-                  id: call.id,
-                  name: "read",
-                },
-              };
-              yield {
-                id: `v2-called-${call.id}`,
-                durable: {
-                  aggregateID: sessionID,
-                  seq: 5,
-                  version: 1 as const,
-                },
-                type: "session.tool.called",
-                created: Date.now(),
-                data: {
-                  sessionID,
-                  assistantMessageID,
-                  id: call.id,
-                  input: { path: call.path },
-                  executed: false,
-                },
-              };
-              if (call.status === "error") {
-                continue;
-              }
-              await toolHooks.run("execute.before", {
-                sessionID,
-                messageID: assistantMessageID,
-                agent,
-                tool: "read",
-                id: call.id,
-                input: { path: call.path },
-              });
-            }
-            // Same names and reversed completions must still match by call ID.
-            for (const call of [...calls].reverse()) {
-              if (call.status === "error") {
-                continue;
-              }
-              const input = {
-                sessionID,
-                messageID: assistantMessageID,
-                agent,
-                tool: "read",
-                id: call.id,
-                input: { path: call.path },
-              };
-              const result = {
-                ...input,
-                status: "completed",
-                result: {
-                  content:
-                    call.id === "v2-call-second"
-                      ? [
-                          { type: "text", text: "Second" },
-                          { type: "text", text: "response" },
-                        ]
-                      : call.content,
-                },
-              } satisfies Parameters<ToolHook>[0];
-              await toolHooks.run("execute.after", result);
-              await toolHooks.run("execute.after", result);
-            }
-            yield {
-              id: "v2-tools-ended",
-              durable: { aggregateID: sessionID, seq: 2, version: 1 as const },
-              type: "session.step.ended",
-              created: Date.now(),
-              data: {
-                sessionID,
-                assistantMessageID,
-                finish: "tool-calls",
-                cost: 0,
-                tokens,
-              },
-            };
-            await sessionHooks.run("context", {
+            const input = {
               sessionID,
+              messageID: assistantMessageID,
+              agent,
+              tool: "read",
+              id: call.id,
+              input: { path: call.path },
+            };
+            const result = {
+              ...input,
+              status: "completed",
+              result: {
+                content:
+                  call.id === "v2-call-second"
+                    ? [
+                        { type: "text", text: "Second" },
+                        { type: "text", text: "response" },
+                      ]
+                    : call.content,
+              },
+            } satisfies Parameters<ToolHook>[0];
+            await toolHooks.run("execute.after", result);
+            await toolHooks.run("execute.after", result);
+          }
+          yield {
+            id: "v2-tools-ended",
+            durable: { aggregateID: sessionID, seq: 2, version: 1 as const },
+            type: "session.step.ended",
+            created: Date.now(),
+            data: {
+              sessionID,
+              assistantMessageID,
+              finish: "tool-calls",
+              cost: 0,
+              tokens,
+            },
+          };
+          await sessionHooks.run("context", {
+            sessionID,
+            agent,
+            model,
+            system: [],
+            messages,
+            options: {},
+            tools: {},
+          });
+          yield {
+            id: "v2-followup-started",
+            durable: { aggregateID: sessionID, seq: 3, version: 1 as const },
+            type: "session.step.started",
+            created: Date.now(),
+            data: {
+              sessionID,
+              assistantMessageID: followupMessageID,
               agent,
               model,
-              system: [],
-              messages,
-              options: {},
-              tools: {},
-            });
+            },
+          };
+          // A late first-generation hook must not attach to the active followup.
+          for (const call of calls.filter((call) => call.status === "error")) {
+            const input = {
+              sessionID,
+              messageID: assistantMessageID,
+              agent,
+              tool: "read",
+              id: call.id,
+              input: { path: call.path },
+            };
+            await toolHooks.run("execute.before", input);
+            await toolHooks.run("execute.before", input);
+            const result = {
+              ...input,
+              status: "error" as const,
+              error: new ToolError({ message: call.content }),
+            };
+            await toolHooks.run("execute.after", result);
+            await toolHooks.run("execute.after", result);
             yield {
-              id: "v2-followup-started",
-              durable: { aggregateID: sessionID, seq: 3, version: 1 as const },
-              type: "session.step.started",
+              id: `v2-late-called-${call.id}`,
+              durable: {
+                aggregateID: sessionID,
+                seq: 6,
+                version: 1 as const,
+              },
+              type: "session.tool.called",
               created: Date.now(),
               data: {
                 sessionID,
-                assistantMessageID: followupMessageID,
-                agent,
-                model,
-              },
-            };
-            // A late first-generation hook must not attach to the active followup.
-            for (const call of calls.filter(
-              (call) => call.status === "error",
-            )) {
-              const input = {
-                sessionID,
-                messageID: assistantMessageID,
-                agent,
-                tool: "read",
+                assistantMessageID,
                 id: call.id,
                 input: { path: call.path },
-              };
-              await toolHooks.run("execute.before", input);
-              await toolHooks.run("execute.before", input);
-              const result = {
-                ...input,
-                status: "error" as const,
-                error: new ToolError({ message: call.content }),
-              };
-              await toolHooks.run("execute.after", result);
-              await toolHooks.run("execute.after", result);
-              yield {
-                id: `v2-late-called-${call.id}`,
-                durable: {
-                  aggregateID: sessionID,
-                  seq: 6,
-                  version: 1 as const,
-                },
-                type: "session.tool.called",
-                created: Date.now(),
-                data: {
-                  sessionID,
-                  assistantMessageID,
-                  id: call.id,
-                  input: { path: call.path },
-                  executed: false,
-                },
-              };
-            }
+                executed: false,
+              },
+            };
+          }
+          yield {
+            id: "v2-followup-input-started",
+            durable: { aggregateID: sessionID, seq: 7, version: 1 as const },
+            type: "session.tool.input.started",
+            created: Date.now(),
+            data: {
+              sessionID,
+              assistantMessageID: followupMessageID,
+              id: followupCallID,
+              name: "bash",
+            },
+          };
+          for (let repeat = 0; repeat < 2; repeat++) {
             yield {
-              id: "v2-followup-input-started",
-              durable: { aggregateID: sessionID, seq: 7, version: 1 as const },
-              type: "session.tool.input.started",
+              id: "v2-followup-called",
+              durable: {
+                aggregateID: sessionID,
+                seq: 8,
+                version: 1 as const,
+              },
+              type: "session.tool.called",
               created: Date.now(),
               data: {
                 sessionID,
                 assistantMessageID: followupMessageID,
                 id: followupCallID,
-                name: "bash",
+                input: { command: "pwd" },
+                executed: false,
               },
             };
-            for (let repeat = 0; repeat < 2; repeat++) {
-              yield {
-                id: "v2-followup-called",
-                durable: {
-                  aggregateID: sessionID,
-                  seq: 8,
-                  version: 1 as const,
-                },
-                type: "session.tool.called",
-                created: Date.now(),
-                data: {
-                  sessionID,
-                  assistantMessageID: followupMessageID,
-                  id: followupCallID,
-                  input: { command: "pwd" },
-                  executed: false,
-                },
-              };
-            }
-            yield {
-              id: "v2-followup-ended",
-              durable: { aggregateID: sessionID, seq: 4, version: 1 as const },
-              type: "session.step.ended",
-              created: Date.now(),
-              data: {
-                sessionID,
-                assistantMessageID: followupMessageID,
-                finish: "tool-calls",
-                cost: 0,
-                tokens,
-              },
-            };
-            const followupToolInput = {
-              sessionID,
-              messageID: followupMessageID,
-              agent,
-              tool: "bash",
-              id: followupCallID,
-              input: { command: "pwd" },
-            };
-            await toolHooks.run("execute.before", followupToolInput);
-            await toolHooks.run("execute.before", followupToolInput);
-            const followupToolResult = {
-              ...followupToolInput,
-              status: "completed" as const,
-              result: { content: "/project" },
-            };
-            await toolHooks.run("execute.after", followupToolResult);
-            await toolHooks.run("execute.after", followupToolResult);
-            yield {
-              id: "v2-execution-succeeded",
-              durable: { aggregateID: sessionID, seq: 5, version: 1 as const },
-              type: "session.execution.succeeded",
-              created: Date.now(),
-              data: { sessionID },
-            };
-          } finally {
-            eventsFinished.resolve(undefined);
           }
-        },
-      }),
-    },
-    get location() {
-      return unexpectedApi();
-    },
-    get options() {
-      return unexpectedApi();
-    },
-    get agent() {
-      return unexpectedApi();
-    },
-    get aisdk() {
-      return unexpectedApi();
-    },
-    get command() {
-      return unexpectedApi();
-    },
-    get experimental() {
-      return unexpectedApi();
-    },
-    get integration() {
-      return unexpectedApi();
-    },
-    get mcp() {
-      return unexpectedApi();
-    },
-    get model() {
-      return unexpectedApi();
-    },
-    get generate() {
-      return unexpectedApi();
-    },
-    get permission() {
-      return unexpectedApi();
-    },
-    get plugin() {
-      return unexpectedApi();
-    },
-    get provider() {
-      return unexpectedApi();
-    },
-    get reference() {
-      return unexpectedApi();
-    },
-    get rpc() {
-      return unexpectedApi();
-    },
-    get shell() {
-      return unexpectedApi();
-    },
-    get skill() {
-      return unexpectedApi();
-    },
-    get storage() {
-      return unexpectedApi();
-    },
-    get vcs() {
-      return unexpectedApi();
-    },
-    get websearch() {
-      return unexpectedApi();
-    },
-    get worktree() {
-      return unexpectedApi();
-    },
-  } satisfies PluginContext;
+          yield {
+            id: "v2-followup-ended",
+            durable: { aggregateID: sessionID, seq: 4, version: 1 as const },
+            type: "session.step.ended",
+            created: Date.now(),
+            data: {
+              sessionID,
+              assistantMessageID: followupMessageID,
+              finish: "tool-calls",
+              cost: 0,
+              tokens,
+            },
+          };
+          const followupToolInput = {
+            sessionID,
+            messageID: followupMessageID,
+            agent,
+            tool: "bash",
+            id: followupCallID,
+            input: { command: "pwd" },
+          };
+          await toolHooks.run("execute.before", followupToolInput);
+          await toolHooks.run("execute.before", followupToolInput);
+          const followupToolResult = {
+            ...followupToolInput,
+            status: "completed" as const,
+            result: { content: "/project" },
+          };
+          await toolHooks.run("execute.after", followupToolResult);
+          await toolHooks.run("execute.after", followupToolResult);
+          yield {
+            id: "v2-execution-succeeded",
+            durable: { aggregateID: sessionID, seq: 5, version: 1 as const },
+            type: "session.execution.succeeded",
+            created: Date.now(),
+            data: { sessionID },
+          };
+        } finally {
+          eventsFinished.resolve(undefined);
+        }
+      },
+    }),
+  });
   // This mock host does not prove compatibility with a running OpenCode server.
   const cleanup = await LangfusePlugin.setup(contextInput);
   if (!cleanup) {
@@ -721,4 +735,103 @@ test("keeps V2 tool calls and observations with their calling generations despit
     messages: exportedMessages,
     tools: [],
   });
+});
+
+test("omits V2 cost_details when OpenCode reports zero cost", async () => {
+  const { spans, collectorErrors } = await createCollector();
+  const sessionID = Schema.decodeUnknownSync(SessionIDSchema)("v2-zero-cost");
+  const assistantMessageID = Schema.decodeUnknownSync(MessageIDSchema)(
+    "v2-zero-cost-assistant",
+  );
+  const tokens = {
+    input: 10,
+    output: 5,
+    reasoning: 2,
+    cache: { read: 3, write: 1 },
+  };
+  const eventsFinished = Promise.withResolvers<undefined>();
+  const registration = { dispose: () => Promise.resolve() };
+  const sessionHooks = createHookRegistry<SessionHookInputs>();
+  const context = createPluginContext({
+    sessionHook: sessionHooks.register,
+    toolHook: () => Promise.resolve(registration),
+    subscribe: () => ({
+      async *[Symbol.asyncIterator]() {
+        try {
+          await sessionHooks.run("prompt", {
+            sessionID,
+            messageID:
+              Schema.decodeUnknownSync(MessageIDSchema)("v2-zero-cost-user"),
+            prompt: {
+              text: "Use a custom provider without OpenCode cost config",
+            },
+            delivery: "steer",
+          });
+          yield {
+            id: "v2-zero-cost-started",
+            durable: { aggregateID: sessionID, seq: 1, version: 1 as const },
+            type: "session.step.started",
+            created: Date.now(),
+            data: {
+              sessionID,
+              assistantMessageID,
+              agent: Agent.ID.make("build"),
+              model: {
+                id: Model.ID.make("custom-model"),
+                providerID: Provider.ID.make("custom-provider"),
+              },
+            },
+          };
+          yield {
+            id: "v2-zero-cost-ended",
+            durable: { aggregateID: sessionID, seq: 2, version: 1 as const },
+            type: "session.step.ended",
+            created: Date.now(),
+            data: {
+              sessionID,
+              assistantMessageID,
+              finish: "stop",
+              cost: 0,
+              tokens,
+            },
+          };
+          yield {
+            id: "v2-zero-cost-succeeded",
+            durable: { aggregateID: sessionID, seq: 3, version: 1 as const },
+            type: "session.execution.succeeded",
+            created: Date.now(),
+            data: { sessionID },
+          };
+        } finally {
+          eventsFinished.resolve(undefined);
+        }
+      },
+    }),
+  });
+
+  const cleanup = await LangfusePlugin.setup(context);
+  if (!cleanup) {
+    throw new Error("Expected plugin cleanup");
+  }
+  onTestFinished(cleanup);
+  await eventsFinished.promise;
+
+  expect(collectorErrors).toEqual([]);
+  const generations = spans.filter(
+    (span) => span.name === "opencode.generation",
+  );
+  expect(generations).toHaveLength(1);
+  expect(
+    getJsonAttribute(generations[0], "langfuse.observation.usage_details"),
+  ).toEqual({
+    input: 10,
+    output: 5,
+    reasoning: 2,
+    cache_read: 3,
+    cache_write: 1,
+    total: 17,
+  });
+  expect(
+    generations[0].attributes.map((attribute) => attribute.key),
+  ).not.toContain("langfuse.observation.cost_details");
 });

@@ -14,6 +14,19 @@ import { Context as EffectContext, Effect } from "effect";
 
 import { PLUGIN_VERSION } from "./version.js";
 
+function getCostAttributes(cost: number) {
+  // Custom/proxy providers without per-model pricing in opencode.json
+  // can report cost: 0 on completed assistant messages / generation steps.
+  // Omit these costs so Langfuse can calculate them from its model pricing instead.
+  // OpenCode's pricing fallback: https://github.com/anomalyco/opencode/blob/4c9a4309ce7f4f5926416792a30a3b27281d9923/packages/opencode/src/provider/provider.ts#L1502-L1509
+  if (cost > 0) {
+    return {
+      "langfuse.observation.cost_details": JSON.stringify({ total: cost }),
+    };
+  }
+  return {};
+}
+
 export class LangfuseClient {
   readonly baseUrl: string;
   readonly forceFlush: Effect.Effect<void, unknown>;
@@ -758,10 +771,7 @@ export class LangfuseClient {
             input.tokens.input + input.tokens.output + input.tokens.reasoning,
         }),
       );
-      step.span.setAttribute(
-        "langfuse.observation.cost_details",
-        JSON.stringify({ total: input.cost }),
-      );
+      step.span.setAttributes(getCostAttributes(input.cost));
       step.span.setAttribute(
         "langfuse.observation.metadata",
         JSON.stringify({
@@ -821,9 +831,7 @@ export class LangfuseClient {
               input.tokens.total ??
               input.tokens.input + input.tokens.output + input.tokens.reasoning,
           }),
-          "langfuse.observation.cost_details": JSON.stringify({
-            total: input.cost,
-          }),
+          ...getCostAttributes(input.cost),
           "langfuse.observation.metadata": JSON.stringify({
             messageID: input.messageID,
             parentID: input.parentID,
