@@ -3,7 +3,8 @@ import { createServer } from "node:http";
 import type { IncomingHttpHeaders, Server } from "node:http";
 import { gunzipSync } from "node:zlib";
 
-import { trace } from "@opentelemetry/api";
+import { context, trace } from "@opentelemetry/api";
+import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import LangfusePlugin from "@langfuse/opencode-observability-plugin/v1";
 import { Schema } from "effect";
 import {
@@ -629,6 +630,50 @@ afterAll(() => {
 });
 
 describe("built plugin", { concurrent: false }, () => {
+  test("exports independently of an active host tracer provider", async () => {
+    await disposeHooks();
+    const hostProvider = new NodeTracerProvider();
+    hostProvider.register();
+    const hostGlobalProvider = trace.getTracerProvider();
+    const hostSpan = hostProvider.getTracer("host").startSpan("host");
+    try {
+      hooksDisposed = false;
+      hooks = await createHooks(collectorBaseUrl);
+      expect(trace.getTracerProvider()).toBe(hostGlobalProvider);
+      await context.with(
+        trace.setSpan(context.active(), hostSpan),
+        async () => {
+          await sendUserMessage({
+            sessionID: "host-provider-session",
+            messageID: "host-provider-user",
+            text: "Keep plugin telemetry independent",
+            started: startedAt,
+          });
+        },
+      );
+      await disposeHooks();
+      const spans = requests.flatMap((request) =>
+        request.body.resourceSpans.flatMap((resource) =>
+          resource.scopeSpans.flatMap((scope) => scope.spans),
+        ),
+      );
+      const turn = spans.find((span) => span.name === "opencode.turn");
+      const message = spans.find(
+        (span) => span.name === "opencode.message.user",
+      );
+      expect(turn).toBeDefined();
+      expect(turn?.traceId).not.toBe(hostSpan.spanContext().traceId);
+      expect(turn?.parentSpanId ?? "").toBe("");
+      expect(message?.traceId).toBe(turn?.traceId);
+      expect(message?.parentSpanId).toBe(turn?.spanId);
+    } finally {
+      hostSpan.end();
+      context.disable();
+      trace.disable();
+      await hostProvider.shutdown();
+    }
+  });
+
   test("resolves the OpenCode 1 package entrypoint", () => {
     expect(typeof LangfusePlugin).toBe("function");
   });

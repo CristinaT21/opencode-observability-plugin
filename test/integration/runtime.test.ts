@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -41,6 +42,28 @@ afterEach(async () => {
 });
 
 describe("Langfuse runtime", () => {
+  test("loads every built entrypoint without external runtime packages", () => {
+    execFileSync(process.execPath, [
+      "--input-type=module",
+      "-e",
+      `
+        import { isBuiltin, registerHooks } from "node:module";
+        registerHooks({
+          resolve(specifier, context, nextResolve) {
+            if (!isBuiltin(specifier) && !specifier.startsWith(".") && !specifier.startsWith("file:")) {
+              throw new Error("Unexpected external dependency: " + specifier);
+            }
+            return nextResolve(specifier, context);
+          },
+        });
+        for (const entry of process.argv.slice(1)) await import(entry);
+      `,
+      ...["index.js", "v1/index.js", "v2/index.js"].map(
+        (entry) => new URL(`../../dist/${entry}`, import.meta.url).href,
+      ),
+    ]);
+  });
+
   test("creates one shared client for concurrent initialization", async () => {
     const client = { id: "shared-client" };
     let clientCreations = 0;

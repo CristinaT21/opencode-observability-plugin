@@ -13,14 +13,20 @@ export default defineConfig({
   },
   format: ["esm"],
   platform: "node",
+  inputOptions: {
+    // Prefer tree-shakeable ESM dependencies over their CommonJS builds.
+    resolve: {
+      mainFields: ["module", "main"],
+    },
+  },
   dts: false,
-  sourcemap: true,
+  sourcemap: false,
   clean: true,
   fixedExtension: false,
   deps: {
-    // OpenCode V2 replaces external Effect imports with its Effect 4 runtime.
-    alwaysBundle: ["effect"],
-    neverBundle: ["@opentelemetry/api"],
+    // Ship the tested dependency graph, not packages resolved by the host.
+    alwaysBundle: [/^@langfuse\//, /^@opentelemetry\//, /^effect(?:\/|$)/],
+    neverBundle: [/^@opencode(?:-ai)?\//],
     onlyBundle: false,
   },
   outputOptions: {

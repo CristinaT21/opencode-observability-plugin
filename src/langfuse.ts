@@ -1,6 +1,7 @@
 import { LangfuseSpanProcessor } from "@langfuse/otel";
 import type { Hooks } from "@opencode-ai/plugin";
-import { SpanStatusCode, context, trace } from "@opentelemetry/api";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import type { Span as ApiSpan, Tracer } from "@opentelemetry/api";
 import type { Span, SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import {
@@ -13,6 +14,9 @@ import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { Context as EffectContext, Effect } from "effect";
 
 import { PLUGIN_VERSION } from "./version.js";
+
+// Parent spans stay local to the plugin, even when the host has its own provider.
+const context = new AsyncLocalStorageContextManager();
 
 function getCostAttributes(cost: number) {
   // Custom/proxy providers without per-model pricing in opencode.json
@@ -305,20 +309,26 @@ export class LangfuseClient {
     this.traceState.tracedEventIds.add(input.id);
 
     const startEvent = () => {
-      const span = this.traceState.tracer.startSpan(input.name, {
-        attributes: {
-          "langfuse.observation.type": "event",
-          "session.id": input.sessionID,
-          ...(input.input === undefined
-            ? {}
-            : { "langfuse.observation.input": JSON.stringify(input.input) }),
-          ...(input.output === undefined
-            ? {}
-            : { "langfuse.observation.output": JSON.stringify(input.output) }),
-          "langfuse.observation.metadata": JSON.stringify(input.metadata),
+      const span = this.traceState.tracer.startSpan(
+        input.name,
+        {
+          attributes: {
+            "langfuse.observation.type": "event",
+            "session.id": input.sessionID,
+            ...(input.input === undefined
+              ? {}
+              : { "langfuse.observation.input": JSON.stringify(input.input) }),
+            ...(input.output === undefined
+              ? {}
+              : {
+                  "langfuse.observation.output": JSON.stringify(input.output),
+                }),
+            "langfuse.observation.metadata": JSON.stringify(input.metadata),
+          },
+          startTime: new Date(input.timestamp),
         },
-        startTime: new Date(input.timestamp),
-      });
+        context.active(),
+      );
 
       span.end(new Date(input.timestamp));
     };
@@ -511,25 +521,29 @@ export class LangfuseClient {
     );
 
     this.withTurnParent(input.sessionID, undefined, () => {
-      const span = this.traceState.tracer.startSpan("opencode.generation", {
-        attributes: {
-          "langfuse.observation.type": "generation",
-          "session.id": input.sessionID,
-          "langfuse.observation.model.name": input.model.id,
-          ...(generationInput
-            ? {
-                "langfuse.observation.input": JSON.stringify(generationInput),
-              }
-            : {}),
-          "langfuse.observation.metadata": JSON.stringify({
-            agent: input.agent,
-            providerID: input.model.providerID,
-            variant: input.model.variant,
-            snapshot: input.snapshot,
-          }),
+      const span = this.traceState.tracer.startSpan(
+        "opencode.generation",
+        {
+          attributes: {
+            "langfuse.observation.type": "generation",
+            "session.id": input.sessionID,
+            "langfuse.observation.model.name": input.model.id,
+            ...(generationInput
+              ? {
+                  "langfuse.observation.input": JSON.stringify(generationInput),
+                }
+              : {}),
+            "langfuse.observation.metadata": JSON.stringify({
+              agent: input.agent,
+              providerID: input.model.providerID,
+              variant: input.model.variant,
+              snapshot: input.snapshot,
+            }),
+          },
+          startTime: new Date(input.started),
         },
-        startTime: new Date(input.started),
-      });
+        context.active(),
+      );
 
       this.traceState.activeGenerationSteps.set(input.sessionID, {
         sessionID: input.sessionID,
@@ -643,21 +657,25 @@ export class LangfuseClient {
     );
     const parentSpan = this.getSessionParentSpan(input.sessionID);
     const startTurn = () => {
-      const span = this.traceState.tracer.startSpan("opencode.turn", {
-        attributes: {
-          "langfuse.observation.type": "agent",
-          "langfuse.internal.is_app_root": !parentSpan,
-          "session.id": input.sessionID,
-          "langfuse.observation.input": JSON.stringify([formattedMessage]),
-          "langfuse.observation.metadata": JSON.stringify({
-            messageID: input.messageID,
-            agent: input.agent,
-            providerID: input.model?.providerID,
-            modelID: input.model?.modelID,
-            parentSessionID,
-          }),
+      const span = this.traceState.tracer.startSpan(
+        "opencode.turn",
+        {
+          attributes: {
+            "langfuse.observation.type": "agent",
+            "langfuse.internal.is_app_root": !parentSpan,
+            "session.id": input.sessionID,
+            "langfuse.observation.input": JSON.stringify([formattedMessage]),
+            "langfuse.observation.metadata": JSON.stringify({
+              messageID: input.messageID,
+              agent: input.agent,
+              providerID: input.model?.providerID,
+              modelID: input.model?.modelID,
+              parentSessionID,
+            }),
+          },
         },
-      });
+        context.active(),
+      );
 
       if (parentSpan) {
         span.setAttribute("langfuse.internal.is_app_root", false);
@@ -698,6 +716,7 @@ export class LangfuseClient {
               }),
             },
           },
+          context.active(),
         );
 
         event.end();
@@ -864,39 +883,45 @@ export class LangfuseClient {
     );
 
     this.withTurnParent(input.sessionID, input.parentID, () => {
-      const span = this.traceState.tracer.startSpan("opencode.generation", {
-        attributes: {
-          "langfuse.observation.type": "generation",
-          "session.id": input.sessionID,
-          "langfuse.observation.model.name": input.modelID,
-          ...(generationInput
-            ? {
-                "langfuse.observation.input": JSON.stringify(generationInput),
-              }
-            : {}),
-          "langfuse.observation.output": JSON.stringify(output),
-          "langfuse.observation.usage_details": JSON.stringify({
-            input: input.tokens.input,
-            output: input.tokens.output,
-            reasoning: input.tokens.reasoning,
-            cache_read: input.tokens.cache.read,
-            cache_write: input.tokens.cache.write,
-            total:
-              input.tokens.total ??
-              input.tokens.input + input.tokens.output + input.tokens.reasoning,
-          }),
-          ...getCostAttributes(input.cost),
-          "langfuse.observation.metadata": JSON.stringify({
-            messageID: input.messageID,
-            parentID: input.parentID,
-            agent: input.agent,
-            providerID: input.providerID,
-            mode: input.mode,
-            finish: input.finish,
-          }),
+      const span = this.traceState.tracer.startSpan(
+        "opencode.generation",
+        {
+          attributes: {
+            "langfuse.observation.type": "generation",
+            "session.id": input.sessionID,
+            "langfuse.observation.model.name": input.modelID,
+            ...(generationInput
+              ? {
+                  "langfuse.observation.input": JSON.stringify(generationInput),
+                }
+              : {}),
+            "langfuse.observation.output": JSON.stringify(output),
+            "langfuse.observation.usage_details": JSON.stringify({
+              input: input.tokens.input,
+              output: input.tokens.output,
+              reasoning: input.tokens.reasoning,
+              cache_read: input.tokens.cache.read,
+              cache_write: input.tokens.cache.write,
+              total:
+                input.tokens.total ??
+                input.tokens.input +
+                  input.tokens.output +
+                  input.tokens.reasoning,
+            }),
+            ...getCostAttributes(input.cost),
+            "langfuse.observation.metadata": JSON.stringify({
+              messageID: input.messageID,
+              parentID: input.parentID,
+              agent: input.agent,
+              providerID: input.providerID,
+              mode: input.mode,
+              finish: input.finish,
+            }),
+          },
+          startTime: new Date(input.created),
         },
-        startTime: new Date(input.created),
-      });
+        context.active(),
+      );
 
       this.traceState.generationParentSpans.set(input.sessionID, span);
       this.traceState.generationSpansByMessageId.set(input.messageID, span);
@@ -980,6 +1005,7 @@ export class LangfuseClient {
           },
           startTime: new Date(input.completed),
         },
+        context.active(),
       );
 
       span.setStatus({
@@ -1063,20 +1089,24 @@ export class LangfuseClient {
     this.withObservationParent(
       input.sessionID,
       () => {
-        const span = this.traceState.tracer.startSpan(input.tool, {
-          attributes: {
-            "langfuse.observation.type": "tool",
-            "session.id": input.sessionID,
-            "langfuse.observation.input": JSON.stringify(input.args),
-            "langfuse.observation.metadata": JSON.stringify({
-              callID: input.callID,
-              tool: input.tool,
-            }),
+        const span = this.traceState.tracer.startSpan(
+          input.tool,
+          {
+            attributes: {
+              "langfuse.observation.type": "tool",
+              "session.id": input.sessionID,
+              "langfuse.observation.input": JSON.stringify(input.args),
+              "langfuse.observation.metadata": JSON.stringify({
+                callID: input.callID,
+                tool: input.tool,
+              }),
+            },
+            ...(input.started === undefined
+              ? {}
+              : { startTime: new Date(input.started) }),
           },
-          ...(input.started === undefined
-            ? {}
-            : { startTime: new Date(input.started) }),
-        });
+          context.active(),
+        );
 
         this.traceState.activeToolObservations.set(input.callID, {
           span,
@@ -1229,17 +1259,21 @@ export class LangfuseClient {
 
     this.withTurnParent(sessionID, undefined, () => {
       const generationInput = this.consumeGenerationInput(sessionID);
-      const span = this.traceState.tracer.startSpan("opencode.generation", {
-        attributes: {
-          "langfuse.observation.type": "generation",
-          "session.id": sessionID,
-          ...(generationInput
-            ? {
-                "langfuse.observation.input": JSON.stringify(generationInput),
-              }
-            : {}),
+      const span = this.traceState.tracer.startSpan(
+        "opencode.generation",
+        {
+          attributes: {
+            "langfuse.observation.type": "generation",
+            "session.id": sessionID,
+            ...(generationInput
+              ? {
+                  "langfuse.observation.input": JSON.stringify(generationInput),
+                }
+              : {}),
+          },
         },
-      });
+        context.active(),
+      );
 
       this.traceState.activeGenerationSteps.set(sessionID, {
         sessionID,
@@ -2005,11 +2039,40 @@ export const createLangfuseClient = (input: {
   serviceName?: string;
   opencodeVersion?: string;
 }) =>
-  Effect.gen(function* () {
+  Effect.sync(() => {
     const tracerName = "opencode-langfuse-plugin";
+    const processor = new LangfuseSpanProcessor({
+      publicKey: input.publicKey,
+      secretKey: input.secretKey,
+      baseUrl: input.baseUrl,
+      environment: input.environment,
+      shouldExportSpan: ({ otelSpan }) =>
+        otelSpan.instrumentationScope.name === tracerName,
+    });
+    const provider = new NodeTracerProvider({
+      // Honor OTEL resource configuration without registering a global provider.
+      resource: defaultResource()
+        .merge(detectResources({ detectors: [envDetector] }))
+        .merge(
+          input.serviceName != null
+            ? resourceFromAttributes({ "service.name": input.serviceName })
+            : null,
+        ),
+      spanProcessors: [
+        makePluginVersionSpanProcessor(),
+        ...(input.opencodeVersion != null
+          ? [makeOpencodeVersionSpanProcessor(input.opencodeVersion)]
+          : []),
+        ...(input.userId != null
+          ? [makeUserIdSpanProcessor(input.userId)]
+          : []),
+        processor,
+        makeAppRootSpanProcessor(tracerName),
+      ],
+    });
     const traceState: LangfuseTraceState = {
       tracerName,
-      tracer: trace.getTracer(tracerName, PLUGIN_VERSION),
+      tracer: provider.getTracer(tracerName, PLUGIN_VERSION),
       abortedSessions: new Set<string>(),
       tracedMessageIds: new Set<string>(),
       tracedGenerationIds: new Set<string>(),
@@ -2031,42 +2094,6 @@ export const createLangfuseClient = (input: {
       sessionHistories: new Map<string, SessionHistory>(),
       pendingUserMessageIdsBySession: new Map<string, string>(),
     };
-
-    const processor = new LangfuseSpanProcessor({
-      publicKey: input.publicKey,
-      secretKey: input.secretKey,
-      baseUrl: input.baseUrl,
-      environment: input.environment,
-      shouldExportSpan: ({ otelSpan }) =>
-        otelSpan.instrumentationScope.name === traceState.tracerName,
-    });
-
-    const provider = new NodeTracerProvider({
-      // Honor OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES, which a bare
-      // NodeTracerProvider does not read on its own. Merged-in attributes win,
-      // so a configured serviceName overrides the environment.
-      resource: defaultResource()
-        .merge(detectResources({ detectors: [envDetector] }))
-        .merge(
-          input.serviceName != null
-            ? resourceFromAttributes({ "service.name": input.serviceName })
-            : null,
-        ),
-      spanProcessors: [
-        makePluginVersionSpanProcessor(),
-        ...(input.opencodeVersion != null
-          ? [makeOpencodeVersionSpanProcessor(input.opencodeVersion)]
-          : []),
-        ...(input.userId != null
-          ? [makeUserIdSpanProcessor(input.userId)]
-          : []),
-        processor,
-        makeAppRootSpanProcessor(traceState.tracerName),
-      ],
-    });
-    yield* Effect.sync(() => {
-      provider.register();
-    });
 
     return new LangfuseClient({
       baseUrl: input.baseUrl,
