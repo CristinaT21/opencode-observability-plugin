@@ -4,8 +4,9 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions: {}
 
@@ -14,25 +15,60 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  check-release:
+    name: Check for release tag
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check release version
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          tag="v$package_version"
+          if ! git show-ref --verify --quiet "refs/tags/$tag"; then
+            if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo "Expected release tag $tag on the selected main commit" >&2
+              exit 1
+            fi
+            echo "No release tag $tag; skipping release"
+            exit 0
+          fi
+          if [[ "$(git rev-parse "$tag^{commit}")" != "$GITHUB_SHA" ]]; then
+            if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo "Tag $tag does not point to the selected main commit" >&2
+              exit 1
+            fi
+            echo "Tag $tag does not point to this commit; skipping release"
+            exit 0
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
   release:
     name: Stage npm package and create GitHub release
+    needs: check-release
+    if: needs.check-release.outputs.tag != ''
     environment: protected branches
     runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
+    env:
+      RELEASE_TAG: ${{ needs.check-release.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-      - name: Validate release version
-        run: |
-          package_version="$(node -p "require('./package.json').version")"
-          if [[ "$GITHUB_REF_NAME" != "v$package_version" ]]; then
-            echo "Tag $GITHUB_REF_NAME does not match package.json version $package_version" >&2
-            exit 1
-          fi
       - name: Setup pnpm
         uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
         with:
@@ -55,12 +91,12 @@ jobs:
         run: pnpm run test:integration
       - name: Stage npm package
         run: |
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+          if [[ "$RELEASE_TAG" == *-* ]]; then
             npm stage publish --provenance --access public --tag next
           else
             npm stage publish --provenance --access public
           fi
       - name: Create draft GitHub release
-        run: gh release create "$GITHUB_REF_NAME" --draft --generate-notes --verify-tag
+        run: gh release create "$RELEASE_TAG" --draft --generate-notes --verify-tag
         env:
           GH_TOKEN: ${{ github.token }}

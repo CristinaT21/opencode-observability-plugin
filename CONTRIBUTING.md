@@ -66,7 +66,9 @@ tsdown bundles the combined plugin and its runtime dependencies into `dist/index
    git push origin main --follow-tags
    ```
 
-   `pnpm version` updates `package.json`, creates a commit titled `Release v1.2.3`, and tags it as `v1.2.3`. The release workflow verifies the version, builds and tests the package, stages it on npm with provenance, and creates a draft GitHub release.
+   `pnpm version` updates `package.json`, creates a commit titled `Release v1.2.3`, and tags it as `v1.2.3`. The release workflow runs on pushes to `main` and skips commits without a matching version tag. For tagged release commits, it builds and tests the package, stages it on npm with provenance, and creates a draft GitHub release.
+
+   If the tag was pushed separately, manually run the Release workflow with `main` selected. The tag matching `package.json` must point to the selected `main` commit. Manual runs fail if that tag is missing or points elsewhere.
 
 2. Review the staged package on npmjs.com or with the npm CLI:
 
