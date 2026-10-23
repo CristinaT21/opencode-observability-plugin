@@ -259,7 +259,7 @@ export type OpencodeEvent =
 // https://github.com/anomalyco/opencode/blob/v1.18.19/packages/opencode/src/tool/tool.ts#L48-L53
 export const NativeToolResultSchema = Schema.Struct({
   title: Schema.String,
-  metadata: Schema.Record({ key: Schema.String, value: Schema.Unknown }),
+  metadata: Schema.Record(Schema.String, Schema.Unknown),
   output: Schema.String,
   attachments: Schema.optional(Schema.Array(Schema.Unknown)),
 });
@@ -268,16 +268,14 @@ export const NativeToolResultSchema = Schema.Struct({
 export const McpToolResultSchema = Schema.Struct({
   content: Schema.Array(Schema.Unknown),
   structuredContent: Schema.optional(
-    Schema.Record({ key: Schema.String, value: Schema.Unknown }),
+    Schema.Record(Schema.String, Schema.Unknown),
   ),
   isError: Schema.optional(Schema.Boolean),
-  _meta: Schema.optional(
-    Schema.Record({ key: Schema.String, value: Schema.Unknown }),
-  ),
+  _meta: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 });
 
 // https://github.com/anomalyco/opencode/blob/v1.18.19/packages/opencode/src/session/tools.ts#L436-L461
-const McpResourceContentsSchema = Schema.Union(
+const McpResourceContentsSchema = Schema.Union([
   Schema.Struct({
     uri: Schema.String,
     mimeType: Schema.optional(Schema.String),
@@ -288,10 +286,10 @@ const McpResourceContentsSchema = Schema.Union(
     mimeType: Schema.optional(Schema.String),
     blob: Schema.String,
   }),
-);
+]);
 
 // https://github.com/anomalyco/opencode/blob/v1.18.19/packages/opencode/src/session/tools.ts#L426-L461
-export const McpContentSchema = Schema.Union(
+export const McpContentSchema = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("text"),
     text: Schema.String,
@@ -305,4 +303,4 @@ export const McpContentSchema = Schema.Union(
     type: Schema.Literal("resource"),
     resource: McpResourceContentsSchema,
   }),
-);
+]);

@@ -48,7 +48,7 @@ const SpanSchema = Schema.Struct({
     }),
   ),
 });
-const PayloadSchema = Schema.parseJson(
+const PayloadSchema = Schema.fromJsonString(
   Schema.Struct({
     resourceSpans: Schema.Array(
       Schema.Struct({
@@ -66,7 +66,7 @@ const getJsonAttribute = (span: typeof SpanSchema.Type, key: string) => {
   if (value === undefined) {
     throw new Error(`Expected ${span.name} attribute ${key}`);
   }
-  return Schema.decodeUnknownSync(Schema.parseJson(Schema.Unknown))(value);
+  return Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(value);
 };
 
 function createPluginContext(input: {

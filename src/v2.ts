@@ -7,11 +7,14 @@ import { createLangfuseRuntime } from "./runtime.js";
 import { PLUGIN_VERSION } from "./version.js";
 
 const SpanContextSchema = Schema.Struct({
-  traceId: Schema.String.pipe(Schema.pattern(/^(?!0{32}$)[0-9a-f]{32}$/)),
-  spanId: Schema.String.pipe(Schema.pattern(/^(?!0{16}$)[0-9a-f]{16}$/)),
-  traceFlags: Schema.Number.pipe(Schema.int(), Schema.between(0, 255)),
+  traceId: Schema.String.check(Schema.isPattern(/^(?!0{32}$)[0-9a-f]{32}$/)),
+  spanId: Schema.String.check(Schema.isPattern(/^(?!0{16}$)[0-9a-f]{16}$/)),
+  traceFlags: Schema.Number.check(
+    Schema.isInt(),
+    Schema.isBetween({ minimum: 0, maximum: 255 }),
+  ),
 });
-const TraceContextSchema = Schema.parseJson(
+const TraceContextSchema = Schema.fromJsonString(
   Schema.Struct({
     turn: Schema.optional(SpanContextSchema),
     generation: Schema.optional(SpanContextSchema),

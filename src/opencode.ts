@@ -6,6 +6,7 @@ export type OpencodeClient = Pick<
   "app" | "tool" | "session"
 >;
 
-export class OpencodeClientService extends EffectContext.Tag(
-  "OpencodeClientService",
-)<OpencodeClientService, OpencodeClient>() {}
+export class OpencodeClientService extends EffectContext.Service<
+  OpencodeClientService,
+  OpencodeClient
+>()("OpencodeClientService") {}

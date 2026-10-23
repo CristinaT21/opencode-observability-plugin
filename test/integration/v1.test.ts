@@ -126,7 +126,7 @@ const McpToolOutputSchema = Schema.declare(
 );
 
 const packageJson = Schema.decodeUnknownSync(
-  Schema.parseJson(Schema.Struct({ version: Schema.String })),
+  Schema.fromJsonString(Schema.Struct({ version: Schema.String })),
 )(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
 
 const packageVersion = packageJson.version;
@@ -230,7 +230,7 @@ const getJsonAttribute = (span: OtlpSpan, key: string) => {
     throw new Error(`Expected ${span.name} attribute ${key} to be JSON`);
   }
 
-  return Schema.decodeUnknownSync(Schema.parseJson(Schema.Unknown))(value);
+  return Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(value);
 };
 
 const getSpan = (spans: OtlpSpan[], name: string) => {
@@ -552,7 +552,7 @@ beforeEach(async () => {
           url: request.url,
           headers: request.headers,
           body: Schema.decodeUnknownSync(
-            Schema.parseJson(CapturedRequestBodySchema),
+            Schema.fromJsonString(CapturedRequestBodySchema),
           )(decodedBody.toString("utf8")),
         });
         response.writeHead(collectorStatus, {

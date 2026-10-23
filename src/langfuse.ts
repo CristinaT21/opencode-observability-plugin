@@ -1975,9 +1975,10 @@ export type ActiveGenerationStep = {
   snapshot?: string;
 };
 
-export class LangfuseClientService extends EffectContext.Tag(
-  "LangfuseClientService",
-)<LangfuseClientService, LangfuseClient>() {}
+export class LangfuseClientService extends EffectContext.Service<
+  LangfuseClientService,
+  LangfuseClient
+>()("LangfuseClientService") {}
 
 const makeUserIdSpanProcessor = (userId: string) =>
   ({

@@ -14,3 +14,4 @@ minimumReleaseAgeExclude:
   - "@opencode/protocol@2.0.4"
   - "@opencode/schema@2.0.4"
   - "@opencode/util@2.0.4"
+  - effect@4.0.6

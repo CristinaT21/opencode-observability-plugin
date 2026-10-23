@@ -60,9 +60,9 @@ const loadLangfuseCredentials = Effect.gen(function* () {
 
   const credentials = yield* Effect.tryPromise({
     try: async () =>
-      Schema.decodeUnknownSync(Schema.parseJson(LangfuseCredentialsSchema))(
-        await readFile(configPath, "utf8"),
-      ),
+      Schema.decodeUnknownSync(
+        Schema.fromJsonString(LangfuseCredentialsSchema),
+      )(await readFile(configPath, "utf8")),
     catch: () =>
       new MissingLangfuseCredentials({
         message: "Missing Langfuse credentials",

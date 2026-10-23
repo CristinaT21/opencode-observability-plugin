@@ -24,7 +24,7 @@ const refreshSessionHistory = (sessionID: string) =>
       try: () => opencode.session.messages({ path: { id: sessionID } }),
       catch: (error) => error,
     }).pipe(
-      Effect.catchAll((error) =>
+      Effect.catch((error) =>
         log(
           "info",
           `Reading the conversation of session ${sessionID} failed: ${formatHookError(error)}`,
@@ -376,17 +376,17 @@ const main = Effect.gen(function* () {
   ) =>
     Effect.runPromise(
       effect.pipe(
-        Effect.catchAllDefect((defect) =>
+        Effect.catchDefect((defect) =>
           log(
             "error",
             `Langfuse hook "${hookName}" failed: ${formatHookError(defect)}`,
-          ).pipe(Effect.catchAll(() => Effect.void)),
+          ).pipe(Effect.catch(() => Effect.void)),
         ),
-        Effect.catchAll((error) =>
+        Effect.catch((error) =>
           log(
             "error",
             `Langfuse hook "${hookName}" failed: ${formatHookError(error)}`,
-          ).pipe(Effect.catchAll(() => Effect.void)),
+          ).pipe(Effect.catch(() => Effect.void)),
         ),
         Effect.asVoid,
         Effect.provide(hooksLayer),
@@ -397,7 +397,7 @@ const main = Effect.gen(function* () {
     dispose: () =>
       runHook(
         "dispose",
-        finalizeTracing.pipe(Effect.zipRight(langfuse.forceFlush)),
+        finalizeTracing.pipe(Effect.andThen(langfuse.forceFlush)),
       ),
 
     event: ({ event }) => runHook("event", eventHook(event)),
