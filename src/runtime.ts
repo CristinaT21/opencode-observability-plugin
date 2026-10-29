@@ -5,12 +5,15 @@ import { join } from "node:path";
 import {
   Data,
   Effect,
+  Option,
   Schema,
   SynchronizedRef,
   type SynchronizedRef as SynchronizedRefType,
 } from "effect";
 
 import { createLangfuseClient, type LangfuseClient } from "./langfuse.js";
+
+const TagsArraySchema = Schema.Array(Schema.NonEmptyString);
 
 const LangfuseCredentialsSchema = Schema.Struct({
   publicKey: Schema.NonEmptyString,
@@ -19,9 +22,21 @@ const LangfuseCredentialsSchema = Schema.Struct({
   environment: Schema.optional(Schema.NonEmptyString),
   userId: Schema.optional(Schema.NonEmptyString),
   serviceName: Schema.optional(Schema.NonEmptyString),
+  tags: Schema.optional(TagsArraySchema),
 });
 
 type LangfuseCredentials = typeof LangfuseCredentialsSchema.Type;
+
+const PluginOptionsSchema = Schema.Struct({
+  tags: Schema.optional(TagsArraySchema),
+});
+
+// Decodes the optional `tags` plugin option. Unknown or malformed values are
+// dropped so a bad option never disables tracing for the rest of the config.
+export const decodePluginTags = (options: unknown) => {
+  const decoded = Schema.decodeUnknownOption(PluginOptionsSchema)(options);
+  return Option.isSome(decoded) ? decoded.value.tags?.slice() : undefined;
+};
 
 class MissingLangfuseCredentials extends Data.TaggedError(
   "MissingLangfuseCredentials",
@@ -58,23 +73,24 @@ const loadLangfuseCredentials = Effect.gen(function* () {
     "opencode-langfuse.json",
   );
 
-  const credentials = yield* Effect.tryPromise({
-    try: async () =>
-      Schema.decodeUnknownSync(
-        Schema.fromJsonString(LangfuseCredentialsSchema),
-      )(await readFile(configPath, "utf8")),
+  const config = yield* Effect.tryPromise({
+    try: () => readFile(configPath, "utf8"),
     catch: () =>
       new MissingLangfuseCredentials({
         message: "Missing Langfuse credentials",
       }),
-  }).pipe(
-    Effect.mapError(
-      () =>
-        new MissingLangfuseCredentials({
-          message: "Missing Langfuse credentials",
-        }),
-    ),
-  );
+  });
+
+  const credentials = yield* Effect.try({
+    try: () =>
+      Schema.decodeUnknownSync(
+        Schema.fromJsonString(LangfuseCredentialsSchema),
+      )(config),
+    catch: () =>
+      new MissingLangfuseCredentials({
+        message: `Invalid Langfuse config at ${configPath}. Check JSON syntax and field types; publicKey and secretKey must be non-empty strings, and "tags" must be an array of non-empty strings if provided`,
+      }),
+  });
 
   if (!credentials.publicKey || !credentials.secretKey) {
     return yield* Effect.fail(
@@ -111,7 +127,10 @@ declare global {
     | undefined;
 }
 
-export const createLangfuseRuntime = (input: { opencodeVersion?: string }) =>
+export const createLangfuseRuntime = (input: {
+  opencodeVersion?: string;
+  tags?: string[];
+}) =>
   Effect.gen(function* () {
     const credentials = yield* loadLangfuseCredentials;
     const clientInput = {
@@ -128,6 +147,9 @@ export const createLangfuseRuntime = (input: { opencodeVersion?: string }) =>
         "development",
       userId: credentials.userId ?? process.env.LANGFUSE_USER_ID,
       serviceName: credentials.serviceName ?? process.env.LANGFUSE_SERVICE_NAME,
+      // Plugin options win over the config file, mirroring how environment
+      // variables override it for the other settings.
+      tags: input.tags ?? credentials.tags?.slice(),
       opencodeVersion: input.opencodeVersion,
     } satisfies Parameters<typeof createLangfuseClient>[0];
     const cacheKey = JSON.stringify(clientInput);
